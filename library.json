@@ -1,0 +1,22 @@
+{
+    "name": "SerialServo_STS3215",
+    "version": "1.0.0",
+    "keywords": "Serial,Servo,STS3215",
+    "description": "Arduino library for controlling the STS3215 Serial Servo",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Wolfram7539/SerialServo_STS3215.git"
+    },
+    "authors": [
+        {
+            "name": "Wolfram7539",
+            "email": "",
+            "url": "",
+            "maintainer": true
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "esp32",
+    "dependencies": {}
+}
