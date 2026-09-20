@@ -8,7 +8,9 @@
 
 namespace SerialServo
 {
-  STS3215::STS3215(HardwareSerial *serial, uint8_t rx_pin, uint8_t tx_pin, uint8_t ids[]) : _rx_pin(rx_pin), _tx_pin(tx_pin)
+  STS3215::STS3215(HardwareSerial *serial, uint8_t rx_pin, uint8_t tx_pin,
+                   const uint8_t ids[], size_t servo_count)
+      : _rx_pin(rx_pin), _tx_pin(tx_pin)
   {
     _serial = serial;
     _serial->begin(STS_SERIAL_BAUDRATE, STS_SERIAL_MODE, rx_pin, tx_pin);
@@ -16,18 +18,29 @@ namespace SerialServo
     for (int i = 0; i < STS_MAX_SERVO_COUNT; i++)
     {
       _servos[i] = nullptr;
+      _sts_id2index[i] = 0xFF;
     }
-    for (int i = 0; ids[i] != 0; i++)
+    if (servo_count > STS_MAX_SERVO_COUNT)
+      servo_count = STS_MAX_SERVO_COUNT;
+    for (size_t i = 0; i < servo_count; i++)
     {
-      _servo_count++;
       uint8_t id = ids[i];
+      if (id == 0 || _sts_id2index[id] != 0xFF)
+        continue;
       _servos[i] = new Servo_info();
       _servos[i]->id = id;
       _servos[i]->position = 0;
       _servos[i]->velocity = 0;
       _servos[i]->mode = 0;
       _sts_id2index[id] = i;
+      _servo_count++;
     }
+  }
+
+  bool STS3215::isValidId(uint8_t id) const
+  {
+    return _sts_id2index[id] != 0xFF &&
+           _servos[_sts_id2index[id]] != nullptr;
   }
 
   STS3215::~STS3215()
@@ -50,14 +63,14 @@ namespace SerialServo
 
   int STS3215::getPosition(uint8_t id)
   {
-    if (id >= STS_MAX_SERVO_COUNT || _servos[_sts_id2index[id]] == nullptr)
+    if (!isValidId(id))
       return 0;
     return _servos[_sts_id2index[id]]->position;
   }
 
   int STS3215::getVelocity(uint8_t id)
   {
-    if (id >= STS_MAX_SERVO_COUNT || _servos[_sts_id2index[id]] == nullptr)
+    if (!isValidId(id))
       return 0;
     return _servos[_sts_id2index[id]]->velocity;
   }
@@ -116,9 +129,7 @@ namespace SerialServo
 
   void STS3215::setID(uint8_t old_id, uint8_t new_id)
   {
-    if (old_id >= STS_MAX_SERVO_COUNT || new_id >= STS_MAX_SERVO_COUNT)
-      return;
-    if (_servos[_sts_id2index[old_id]] == nullptr)
+    if (!isValidId(old_id) || new_id == 0 || isValidId(new_id))
       return;
     sts_writeByteCmd(old_id, 55, 0);
     vTaskDelay(10 / portTICK_PERIOD_MS); // 書き込み後、少し待つ
@@ -136,7 +147,7 @@ namespace SerialServo
 
   void STS3215::setMode(uint8_t id, uint8_t mode)
   {
-    if (id >= STS_MAX_SERVO_COUNT || _servos[_sts_id2index[id]] == nullptr || mode > 2)
+    if (!isValidId(id) || mode > 2)
       return;
     sts_writeByteCmd(id, 55, 0);
     vTaskDelay(10 / portTICK_PERIOD_MS); // 書き込み後、少し待つ
@@ -159,7 +170,8 @@ namespace SerialServo
 
   void STS3215::writeSpeedM1(uint8_t id, int dir, int speed)
   {
-    int send_data = (dir << 15) + (speed & 0x7FFF);
+    speed = constrain(speed, 0, 0x7FFF);
+    int send_data = ((dir & 1) << 15) + speed;
     byte message[9];
     message[0] = 0xFF; // ヘッダ
     message[1] = 0xFF; // ヘッダ
@@ -175,7 +187,8 @@ namespace SerialServo
 
   void STS3215::writeSpeedM2(uint8_t id, int dir, int speed)
   {
-    int send_data = (dir << 10) + (speed & 0x03FF);
+    speed = constrain(speed, 0, 0x03FF);
+    int send_data = ((dir & 1) << 10) + speed;
     byte message[9];
     message[0] = 0xFF; // ヘッダ
     message[1] = 0xFF; // ヘッダ
@@ -204,87 +217,49 @@ namespace SerialServo
     sts_sendMsgs(message, 9);               // データを送信
   }
 
-  void STS3215::sts_receiveProcess(uint8_t id)
+  bool STS3215::sts_receiveProcess(uint8_t id, uint32_t timeout_us)
   {
+    if (!isValidId(id) || _serial == nullptr)
+      return false;
 
-    byte message[8];                        // コマンドパケットを作成
-    message[0] = 0xFF;                      // ヘッダ
-    message[1] = 0xFF;                      // ヘッダ
-    message[2] = id;                        // サーボID
-    message[3] = 4;                         // パケットデータ長
-    message[4] = 2;                         // コマンド
-    message[5] = 56;                        // レジスタ先頭番号
-    message[6] = 4;                         // 読み込みバイト数
-    message[7] = sts_calcCkSum(message, 8); // チェックサム
-    if (_serial == nullptr)
+    byte message[8] = {0xFF, 0xFF, id, 4, 2, 56, 4, 0};
+    message[7] = sts_calcCkSum(message, 8);
+    if (xSemaphoreTake(_mutex, portMAX_DELAY) != pdTRUE)
+      return false;
+
+    while (_serial->available())
+      _serial->read();
+    _serial->write(message, sizeof(message));
+    _serial->flush();
+
+    constexpr size_t response_size = 10;
+    uint8_t response[response_size];
+    size_t received = 0;
+    uint32_t start_us = micros();
+    while ((uint32_t)(micros() - start_us) < timeout_us && received < response_size)
     {
-      Serial.println("Serial is nullptr");
-      return;
+      while (_serial->available() && received < response_size)
+        response[received++] = _serial->read();
+      yield();
     }
-    if (xSemaphoreTake(_mutex, portMAX_DELAY) == pdTRUE)
-    {
-      for (int i = 0; i < 8; i++)
-        _serial->write(message[i]);
-      unsigned long startTime = millis();
-      while (1)
-      {
-        if (_serial->available())
-        {
-          byte d1 = _serial->read();
-          byte d2 = _serial->read();
-          if (d1 == 0xFF && d2 == 0xFF)
-          {
-            byte rid = _serial->read();
-            byte rlen = _serial->read();
-            byte rmode = _serial->read();
-            if (rid == id && rlen == 6 && rmode == 0)
-            { // IDと長さを確認
-              byte calc_checksum = rid + rlen + rmode;
-              for (int i = 0; i < rlen - 2; i++)
-              {
-                _buffer[i] = _serial->read(); // データを読み込み
-                calc_checksum += _buffer[i];
-              }
-              byte checksum = _serial->read();
-              calc_checksum = ~(calc_checksum & 0xFF);
-              // チェックサムを確認
-              // Serial.printf("recv checksum:%x calc:%x\n",checksum,calc_checksum);
-              if (checksum == calc_checksum)
-              {
-                // 正常にデータを受信
-                // Serial.printf("Received data for ID %d: ", id);
-                int pos = _buffer[0] + (_buffer[1] << 8);
-                int vel = _buffer[2] + (_buffer[3] << 8);
-                if (vel & 0x8000)
-                  vel = -1 * (vel & 0x7FFF);
-                if (_servos[_sts_id2index[id]] != nullptr)
-                {
-                  _servos[_sts_id2index[id]]->position = pos;
-                  _servos[_sts_id2index[id]]->velocity = vel;
-                }
-                else
-                {
-                  Serial.printf("Error: Servo ID %d not found in internal structure\n", _sts_id2index[id]);
-                }
-                break;
-              }
-              else
-              {
-                Serial.printf("Checksum error for ID %d: received %x, calculated %x\n", id, checksum, calc_checksum);
-                break;
-              }
-            }
-          }
-        }
-        if (millis() - startTime > STS_TIMEOUT)
-        {
-          // タイムアウト処理
-          break;
-        }
-        vTaskDelay(1 / portTICK_PERIOD_MS);
-      }
-      xSemaphoreGive(_mutex);
-    }
+    xSemaphoreGive(_mutex);
+
+    if (received != response_size || response[0] != 0xFF || response[1] != 0xFF ||
+        response[2] != id || response[3] != 6 || response[4] != 0)
+      return false;
+
+    uint8_t checksum = 0;
+    for (size_t i = 2; i < response_size - 1; i++)
+      checksum += response[i];
+    checksum = ~(checksum & 0xFF);
+    if (checksum != response[response_size - 1])
+      return false;
+
+    Servo_info *servo = _servos[_sts_id2index[id]];
+    servo->position = response[5] | (response[6] << 8);
+    int velocity = response[7] | (response[8] << 8);
+    servo->velocity = (velocity & 0x8000) ? -(velocity & 0x7FFF) : velocity;
+    return true;
   }
 
 } // namespace SerialServo

@@ -6,7 +6,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 
-#define STS_TIMEOUT     50  // 応答待ち時間（マイクロ秒）
+#define STS_TIMEOUT_US  2000U // 1 Mbpsでは通常数百us。制御周期を壊さない上限。
 #define STS_MAX_DATA_LENGTH 256   // 最大データ長（適宜変更してください）
 #define STS_SERIAL_BAUDRATE    1000000 // シリアル通信のボーレート
 #define STS_SERIAL_MODE SERIAL_8N1 // シリアル通信のモード
@@ -14,7 +14,8 @@
 namespace SerialServo{
 class STS3215 {
 public:
-    STS3215(HardwareSerial *serial,uint8_t rx_pin,uint8_t tx_pin,uint8_t ids[]);
+    STS3215(HardwareSerial *serial, uint8_t rx_pin, uint8_t tx_pin,
+            const uint8_t ids[], size_t servo_count);
     ~STS3215();
     void setID(uint8_t old_id, uint8_t new_id);
     void setMode(uint8_t id, uint8_t mode);
@@ -23,7 +24,7 @@ public:
     void moveToPosition(uint8_t id, int position);
     int getPosition(uint8_t id);
     int getVelocity(uint8_t id);
-    void sts_receiveProcess(uint8_t id);
+    bool sts_receiveProcess(uint8_t id, uint32_t timeout_us = STS_TIMEOUT_US);
 private:
     void Serialbegin();
     void sts_readBytesCmd(uint8_t id, uint8_t index, uint8_t len);
@@ -47,6 +48,7 @@ private:
       int mode;
     };
     Servo_info* _servos[STS_MAX_SERVO_COUNT] = {nullptr};
+    bool isValidId(uint8_t id) const;
     uint8_t _sts_id2index[STS_MAX_SERVO_COUNT];
 
 };
