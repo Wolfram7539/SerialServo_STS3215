@@ -228,7 +228,7 @@ namespace SerialServo
       unsigned long startTime = millis();
       while (1)
       {
-        if (_serial->available())
+        if (_serial->available() > 0)
         {
           byte d1 = _serial->read();
           byte d2 = _serial->read();
@@ -237,7 +237,7 @@ namespace SerialServo
             byte rid = _serial->read();
             byte rlen = _serial->read();
             byte rmode = _serial->read();
-            if (rid == id && rlen == 6 && rmode == 0)
+            if (rid == id && rlen == 6)
             { // IDと長さを確認
               byte calc_checksum = rid + rlen + rmode;
               for (int i = 0; i < rlen - 2; i++)
@@ -248,7 +248,7 @@ namespace SerialServo
               byte checksum = _serial->read();
               calc_checksum = ~(calc_checksum & 0xFF);
               // チェックサムを確認
-              // Serial.printf("recv checksum:%x calc:%x\n",checksum,calc_checksum);
+              // Serial.printf("recv checksum:%x calc:%x\n", checksum, calc_checksum);
               if (checksum == calc_checksum)
               {
                 // 正常にデータを受信
@@ -261,10 +261,23 @@ namespace SerialServo
                 {
                   _servos[_sts_id2index[id]]->position = pos;
                   _servos[_sts_id2index[id]]->velocity = vel;
+                  // Serial.printf("successfully received data for ID %d: pos=%d, vel=%d\n", id, pos, vel);
                 }
                 else
                 {
                   Serial.printf("Error: Servo ID %d not found in internal structure\n", _sts_id2index[id]);
+                }
+                if (rmode & 0x01)
+                {
+                  Serial.printf("Servo ID %d is over voltage\n", id);
+                }
+                else if (rmode & 0x04)
+                {
+                  Serial.printf("Servo ID %d is over temperature\n", id);
+                }
+                else if (rmode & 0x20)
+                {
+                  Serial.printf("Servo ID %d is over load\n", id);
                 }
                 break;
               }
@@ -274,14 +287,19 @@ namespace SerialServo
                 break;
               }
             }
+            else
+            {
+              Serial.printf("Received packet with unexpected ID %d, requested %d, length %d, mode %d \n", rid, id, rlen, rmode);
+            }
           }
         }
         if (millis() - startTime > STS_TIMEOUT)
         {
           // タイムアウト処理
+          Serial.printf("Timeout while waiting for response from servo ID %d\n", id);
           break;
         }
-        vTaskDelay(1 / portTICK_PERIOD_MS);
+        // vTaskDelay(1 / portTICK_PERIOD_MS);
       }
       xSemaphoreGive(_mutex);
     }
